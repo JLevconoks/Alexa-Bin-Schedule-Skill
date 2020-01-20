@@ -2,7 +2,7 @@
 
 echo "Building Alexa Bin Schedule Skill"
 
-env GOOS=linux GOARCH=amd64 go build .
+env GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" .
 
 echo "Preparing zip package"
 zip -j alexa-bin-schedule-skill.zip alexa-bin-schedule-skill

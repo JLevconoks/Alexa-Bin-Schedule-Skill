@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
@@ -28,8 +29,6 @@ type Payload struct {
 	Text string `json:"text,omitempty"`
 	Ssml string `json:"ssml"`
 }
-
-// Bin Schedule
 
 type BinScheduleDao struct {
 	DocumentId string   `json:"documentId"`
@@ -87,42 +86,45 @@ func MyBinCollectionHandler() (Response, error) {
 		log.Println("Error while unmarshalling", err)
 	}
 
-	schedule := r.toBinSchedule()
-	date := schedule.schedule[0].date
-	response := fmt.Sprintf("<speak>Your next bin is '%v', on %v <say-as interpret-as=\"date\">????%v</say-as></speak>", schedule.schedule[0].colour, date.Format("Monday"), date.Format("0102"))
+	schedule, err := r.toBinSchedule()
+	response := ""
+	if err != nil {
+		response = fmt.Sprintf("<speak>There was an error, '%v'</speak>", err)
+	} else {
+		date := schedule.schedule[0].date
+		response = fmt.Sprintf("<speak>Your next bin is '%v', on %v <say-as interpret-as=\"date\">????%v</say-as></speak>", schedule.schedule[0].colour, date.Format("Monday"), date.Format("0102"))
+	}
 	return buildResponse(response), nil
 
 }
 
-func (dao BinScheduleDao) toBinSchedule() binSchedule {
+func (dao BinScheduleDao) toBinSchedule() (binSchedule, error) {
 	result := binSchedule{DocumentId: dao.DocumentId, PremisesId: dao.PremisesId}
 
-	layout := "2006-01-02"
+	layout := "02/01/06"
 
 	for _, v := range dao.Black {
 		t, err := time.Parse(layout, v)
 		if err != nil {
-			log.Println("Error parsing Date ", v)
-		}
+			return binSchedule{}, errors.New(fmt.Sprintf("Error parsing Date %v", v))
 
+		}
 		result.schedule = append(result.schedule, scheduleItem{"Black", t})
 	}
 
 	for _, v := range dao.Green {
 		t, err := time.Parse(layout, v)
 		if err != nil {
-			log.Println("Error parsing Date ", v)
+			return binSchedule{}, errors.New(fmt.Sprintf("Error parsing Date %v", v))
 		}
-
 		result.schedule = append(result.schedule, scheduleItem{"Green", t})
 	}
 
 	for _, v := range dao.Brown {
 		t, err := time.Parse(layout, v)
 		if err != nil {
-			log.Println("Error parsing Date ", v)
+			return binSchedule{}, errors.New(fmt.Sprintf("Error parsing Date %v", v))
 		}
-
 		result.schedule = append(result.schedule, scheduleItem{"Brown", t})
 	}
 
@@ -130,7 +132,7 @@ func (dao BinScheduleDao) toBinSchedule() binSchedule {
 		return result.schedule[i].date.Before(result.schedule[j].date)
 	})
 
-	return result
+	return result, nil
 }
 
 func buildResponse(rsp string) Response {
