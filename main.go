@@ -14,6 +14,15 @@ import (
 	"time"
 )
 
+const (
+	timestampLayout     = "02/01/06"
+	speakErr            = "<speak>There was an error, %v</speak>"
+	firstSchedulePhrase = "Your next bin is '%v' on '%v', <say-as interpret-as=\"date\">????%v</say-as>. "
+	nextSchedulePhrase  = "Then '%v' on '%v', <say-as interpret-as=\"date\">????%v</say-as>. "
+)
+
+var errNoSchedule = errors.New("no schedule available")
+
 type Response struct {
 	Version string       `json:"version"`
 	Body    ResponseBody `json:"response"`
@@ -36,12 +45,6 @@ type BinScheduleDao struct {
 	Brown      []string `json:"brown"`
 	Green      []string `json:"green"`
 	Black      []string `json:"black"`
-}
-
-type binSchedule struct {
-	DocumentId string
-	PremisesId string
-	schedule   []scheduleItem
 }
 
 type scheduleItem struct {
@@ -80,59 +83,104 @@ func MyBinCollectionHandler() (Response, error) {
 		log.Fatal(err)
 	}
 
-	r := BinScheduleDao{}
-	err = dynamodbattribute.UnmarshalMap(result.Item, &r)
+	rawSchedules := BinScheduleDao{}
+
+	err = dynamodbattribute.UnmarshalMap(result.Item, &rawSchedules)
 	if err != nil {
 		log.Println("Error while unmarshalling", err)
+		return responseWithError(err.Error()), nil
+	}
+	schedules, err := rawSchedules.getNextSchedules()
+	if err != nil {
+		log.Println("Error processing schedules", err)
+		return responseWithError(err.Error()), nil
 	}
 
-	schedule, err := r.toBinSchedule()
-	response := ""
-	if err != nil {
-		response = fmt.Sprintf("<speak>There was an error, '%v'</speak>", err)
-	} else {
-		date := schedule.schedule[0].date
-		response = fmt.Sprintf("<speak>Your next bin is '%v', on %v <say-as interpret-as=\"date\">????%v</say-as></speak>", schedule.schedule[0].colour, date.Format("Monday"), date.Format("0102"))
-	}
-	return buildResponse(response), nil
+	rsp := buildScheduleResponse(schedules)
+	return rsp, nil
 
 }
 
-func (dao BinScheduleDao) toBinSchedule() (binSchedule, error) {
-	result := binSchedule{DocumentId: dao.DocumentId, PremisesId: dao.PremisesId}
-
-	layout := "02/01/06"
-
-	for _, v := range dao.Black {
-		t, err := time.Parse(layout, v)
-		if err != nil {
-			return binSchedule{}, errors.New(fmt.Sprintf("Error parsing Date %v", v))
-
-		}
-		result.schedule = append(result.schedule, scheduleItem{"Black", t})
+func (dao BinScheduleDao) getNextSchedules() ([]scheduleItem, error) {
+	schedules := make([]scheduleItem, 0)
+	blackTime, err := nextScheduled(dao.Black)
+	if err != nil && err != errNoSchedule {
+		return nil, err
 	}
-
-	for _, v := range dao.Green {
-		t, err := time.Parse(layout, v)
-		if err != nil {
-			return binSchedule{}, errors.New(fmt.Sprintf("Error parsing Date %v", v))
-		}
-		result.schedule = append(result.schedule, scheduleItem{"Green", t})
-	}
-
-	for _, v := range dao.Brown {
-		t, err := time.Parse(layout, v)
-		if err != nil {
-			return binSchedule{}, errors.New(fmt.Sprintf("Error parsing Date %v", v))
-		}
-		result.schedule = append(result.schedule, scheduleItem{"Brown", t})
-	}
-
-	sort.Slice(result.schedule, func(i, j int) bool {
-		return result.schedule[i].date.Before(result.schedule[j].date)
+	schedules = append(schedules, scheduleItem{
+		colour: "black",
+		date:   blackTime,
 	})
 
-	return result, nil
+	greenTime, err := nextScheduled(dao.Green)
+	if err != nil && err != errNoSchedule {
+		return nil, err
+	}
+	schedules = append(schedules, scheduleItem{
+		colour: "green",
+		date:   greenTime,
+	})
+
+	brownTime, err := nextScheduled(dao.Brown)
+	if err != nil && err != errNoSchedule {
+		return nil, err
+	}
+	schedules = append(schedules, scheduleItem{
+		colour: "brown",
+		date:   brownTime,
+	})
+
+	sort.Slice(schedules, func(i, j int) bool {
+		return schedules[i].date.Before(schedules[j].date)
+	})
+
+	return schedules, nil
+}
+
+func nextScheduled(rawSchedule []string) (time.Time, error) {
+	schedules := make([]time.Time, 0)
+
+	ignoreBeforeTime := time.Now().Add(-24 * time.Hour)
+	for _, s := range rawSchedule {
+		scheduleTime, err := time.Parse(timestampLayout, s)
+		if err != nil {
+			return time.Time{}, errors.New(fmt.Sprintf("error parsing Date %v", s))
+		}
+
+		if scheduleTime.After(ignoreBeforeTime) {
+			schedules = append(schedules, scheduleTime)
+		}
+	}
+
+	if len(schedules) > 1 {
+		sort.Slice(schedules, func(i, j int) bool {
+			return schedules[i].Before(schedules[j])
+		})
+	}
+
+	if len(schedules) == 0 {
+		return time.Time{}, errNoSchedule
+	}
+
+	return schedules[0], nil
+}
+
+func buildScheduleResponse(schedules []scheduleItem) Response {
+	response := ""
+
+	if len(schedules) == 0 {
+		return responseWithError("No schedules found in the database")
+	}
+
+	for i, s := range schedules {
+		if i == 0 {
+			response += fmt.Sprintf(firstSchedulePhrase, s.colour, s.date.Format("Monday"), s.date.Format("0102"))
+			continue
+		}
+
+		response += fmt.Sprintf(nextSchedulePhrase, s.colour, s.date.Format("Monday"), s.date.Format("0102"))
+	}
+	return buildResponse(fmt.Sprintf("<speak><amazon:domain name=\"long-form\">%v</amazon:domain></speak>", response))
 }
 
 func buildResponse(rsp string) Response {
@@ -146,4 +194,9 @@ func buildResponse(rsp string) Response {
 			ShouldEndSession: true,
 		},
 	}
+}
+
+func responseWithError(errmsg string) Response {
+	speakResponse := fmt.Sprintf(speakErr, errmsg)
+	return buildResponse(speakResponse)
 }
